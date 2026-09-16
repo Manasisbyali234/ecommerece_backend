@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "node --watch src/server.js", "start": "node src/server.js", "seed": "node src/seed.js", "check:r2": "node src/scripts/check-r2.js" },
+  "scripts": { "dev": "node --watch src/server.js", "start": "node src/server.js", "seed": "node src/scripts/seed-admin.js", "seed:demo": "node src/seed.js", "check:r2": "node src/scripts/check-r2.js" },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
