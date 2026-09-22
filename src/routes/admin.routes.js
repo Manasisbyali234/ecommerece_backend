@@ -103,7 +103,11 @@ router.get("/dashboard", requirePermission("dashboard:read"), asyncHandler(async
 }));
 
 router.get("/products", requirePermission("products:read"), asyncHandler(async(req,res)=>{
-  const status=z.enum(["active","draft","archived"]).optional().parse(req.query.status);
+  // Product-list loading must remain resilient to harmless proxy/UI query
+  // parameters. A bad or repeated `status` used to turn the whole catalog
+  // request into a 422 response.
+  const rawStatus=Array.isArray(req.query.status)?req.query.status[0]:req.query.status;
+  const status=["active","draft","archived"].includes(rawStatus)?rawStatus:undefined;
   res.json({items:await Product.find(status?{status}:{}).sort({createdAt:-1})});
 }));
 router.post("/products", requirePermission("products:create"), asyncHandler(async(req,res)=>{
@@ -167,10 +171,12 @@ router.get("/users", requireRole("admin"), requirePermission("users:read"), asyn
   res.json({items:users.map(adminUser)});
 }));
 router.post("/users", requireRole("admin"), requirePermission("users:create"), asyncHandler(async(req,res)=>{
-  const data=z.object({fullName:z.string().trim().min(2).max(100),email:z.string().email(),password:z.string().min(8).max(128),roleId:z.string().optional(),role:z.enum(["admin","support"]).default("admin")}).parse(req.body);
+  const data=z.object({fullName:z.string().trim().min(2).max(100),email:z.string().email(),password:z.string().min(8).max(128).regex(/(?=.*[A-Z])(?=.*\d)/,"Password must include an uppercase letter and a number"),roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),role:z.enum(["admin","support"]).default("admin")}).parse(req.body);
   const existing=await User.findOne({email:data.email.toLowerCase()});
   if(existing)throw fail(409,"An account with this email already exists");
   const roleDoc=data.roleId?await Role.findById(data.roleId):null;
+  if(data.roleId&&!roleDoc)throw fail(404,"Role not found");
+  if(roleDoc?.isSuperAdmin&&await User.exists({roleRef:roleDoc._id}))throw fail(409,"A Super Admin account already exists");
   const user=await User.create({fullName:data.fullName,email:data.email.toLowerCase(),passwordHash:await bcrypt.hash(data.password,12),role:data.role,roleRef:roleDoc?._id||null});
   await user.populate("roleRef");
   // Send welcome email with credentials
@@ -183,12 +189,12 @@ router.post("/users", requireRole("admin"), requirePermission("users:create"), a
   res.status(201).json({user:adminUser(user)});
 }));
 router.patch("/users/:id", requireRole("admin"), requirePermission("users:update"), asyncHandler(async(req,res)=>{
-  const data=z.object({fullName:z.string().trim().min(2).max(100).optional(),role:z.enum(["admin","support"]).optional(),roleId:z.string().optional(),status:z.enum(["active","disabled"]).optional(),password:z.string().min(8).max(128).optional()}).parse(req.body);
+  const data=z.object({fullName:z.string().trim().min(2).max(100).optional(),role:z.enum(["admin","support"]).optional(),roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),status:z.enum(["active","disabled"]).optional(),password:z.string().min(8).max(128).regex(/(?=.*[A-Z])(?=.*\d)/,"Password must include an uppercase letter and a number").optional()}).parse(req.body);
   const patch={};
   if(data.fullName)patch.fullName=data.fullName;
   if(data.role)patch.role=data.role;
   if(data.status)patch.status=data.status;
-  if(data.roleId){const roleDoc=await Role.findById(data.roleId);if(!roleDoc)throw fail(404,"Role not found");patch.roleRef=roleDoc._id;}
+  if(data.roleId){const roleDoc=await Role.findById(data.roleId);if(!roleDoc)throw fail(404,"Role not found");const current=await User.findById(req.params.id);if(roleDoc.isSuperAdmin&&current?.roleRef?.toString()!==roleDoc.id&&await User.exists({roleRef:roleDoc._id}))throw fail(409,"A Super Admin account already exists");patch.roleRef=roleDoc._id;}
   if(data.password)patch.passwordHash=await bcrypt.hash(data.password,12);
   const user=await User.findOneAndUpdate({_id:req.params.id,role:{$in:["admin","support"]}},patch,{new:true,runValidators:true}).populate("roleRef");
   if(!user)throw fail(404,"Admin user not found");
@@ -196,7 +202,9 @@ router.patch("/users/:id", requireRole("admin"), requirePermission("users:update
 }));
 router.delete("/users/:id", requireRole("admin"), requirePermission("users:delete"), asyncHandler(async(req,res)=>{
   if(req.params.id===req.user.id)throw fail(400,"You cannot delete your own account");
-  const user=await User.findOneAndDelete({_id:req.params.id,role:{$in:["admin","support"]}});
+  const candidate=await User.findOne({_id:req.params.id,role:{$in:["admin","support"]}}).populate("roleRef");
+  if(candidate?.roleRef?.isSuperAdmin)throw fail(400,"The Super Admin account cannot be deleted");
+  const user=candidate&&await User.findByIdAndDelete(candidate._id);
   if(!user)throw fail(404,"Admin user not found");
   res.status(204).end();
 }));

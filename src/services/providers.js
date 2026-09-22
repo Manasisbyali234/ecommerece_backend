@@ -38,6 +38,12 @@ export function verifyRazorpayWebhook(rawBody, signature) {
   return Boolean(signature && signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature)));
 }
 
+export function verifyRazorpayPaymentSignature({ orderId, paymentId, signature }) {
+  if (!env.razorpayKeySecret) return false;
+  const expected = crypto.createHmac("sha256", env.razorpayKeySecret).update(`${orderId}|${paymentId}`).digest("hex");
+  return Boolean(signature && signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)));
+}
+
 export async function verifyRazorpayCredentials({ keyId, keySecret }) {
   if (!keyId || !keySecret) throw fail(400, "Razorpay key ID and secret are required");
   const auth = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
