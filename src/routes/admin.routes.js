@@ -270,9 +270,10 @@ router.post("/orders/:id/invoice", asyncHandler(async(req,res)=>{
 router.patch("/invoices/:id", asyncHandler(async(req,res)=>{const patch=z.object({status:z.enum(["paid","pending","overdue","void"]),emailedAt:z.coerce.date().optional()}).partial().parse(req.body);const invoice=await Invoice.findByIdAndUpdate(req.params.id,patch,{new:true});if(!invoice)throw fail(404,"Invoice not found");res.json({invoice});}));
 router.get("/invoices/:id/pdf", asyncHandler(async(req,res)=>{const invoice=await Invoice.findById(req.params.id).populate("order");if(!invoice)throw fail(404,"Invoice not found");res.type("application/pdf").attachment(`${invoice.invoiceNumber}.pdf`).send(invoicePdf(invoice,invoice.order));}));
 router.post("/invoices/:id/email", asyncHandler(async(req,res)=>{
-  const invoice=await Invoice.findById(req.params.id).populate("order");
+  const invoice=await Invoice.findById(req.params.id).populate({path:"order",populate:{path:"user",select:"email"}});
   if(!invoice)throw fail(404,"Invoice not found");
-  const email=invoice.order?.customer?.email||(await User.findById(invoice.customer))?.email;
+  const {to:bodyEmail}=z.object({to:z.string().email().optional()}).parse(req.body||{});
+  const email=bodyEmail||invoice.order?.customer?.email||invoice.order?.user?.email||(await User.findById(invoice.customer).select("email").lean())?.email;
   if(!email)throw fail(400,"This invoice has no customer email address");
   const result=await sendEmail({to:email,subject:`Your invoice ${invoice.invoiceNumber}`,html:`<h1>Metromindz invoice</h1><p>Invoice <strong>${invoice.invoiceNumber}</strong> for order ${invoice.order?.orderNumber||""} is attached in your account.</p><p>Amount: INR ${Number(invoice.amount).toFixed(2)}</p>`});
   if(!result.sent)throw fail(503,result.reason);
