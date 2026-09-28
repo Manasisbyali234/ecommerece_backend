@@ -12,6 +12,8 @@ export const adminUser = (user) => {
     email: user.email,
     role: user.role,
     status: user.status,
+    lastLoginAt: user.lastLoginAt || null,
+    twoFactorEnabled: Boolean(user.twoFactorEnabled),
     updatedAt: user.updatedAt,
     roleRef: role ? {
       id: role._id,

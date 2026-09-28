@@ -1,8 +1,9 @@
 import { Router } from "express";
 import express from "express";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { z } from "zod";
-import { Product, Coupon, Order, Review, User, Role, Setting, Content, Invoice, PaymentGateway } from "../models/index.js";
+import { Product, Coupon, Order, Review, User, Role, Setting, Content, Invoice, PaymentGateway, PasswordToken } from "../models/index.js";
 import { requireAuth, requireRole, requirePermission } from "../middleware/auth.js";
 import { asyncHandler, fail, adminUser } from "../utils/api.js";
 import { sendEmail, verifyRazorpayCredentials, createCarrierLabel, trackCarrierShipment } from "../services/providers.js";
@@ -10,7 +11,7 @@ import { sendOutForDeliveryEmail, sendDeliveredEmail } from "../services/notific
 import { uploadR2Image, deleteR2Image } from "../services/r2.js";
 import { env } from "../config/env.js";
 
-function adminWelcomeEmail({fullName,email,password,role,loginUrl}){
+function adminWelcomeEmail({fullName,email,role,passwordSetupUrl}){
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome to Metromindz</title></head><body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 0"><tr><td align="center">
 <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);max-width:600px;width:100%">
@@ -27,20 +28,16 @@ function adminWelcomeEmail({fullName,email,password,role,loginUrl}){
   <!-- Body -->
   <tr><td style="padding:40px 48px">
     <p style="margin:0 0 8px;color:#374151;font-size:16px">Hi <strong>${fullName}</strong>,</p>
-    <p style="margin:0 0 28px;color:#6b7280;font-size:14px;line-height:1.6">Welcome to the Metromindz team! Your administrator account has been set up. Below are your login credentials &mdash; please keep them secure and change <a href="${loginUrl}" style="color:#f59e0b;font-weight:600;text-decoration:underline">here</a> your password after your first login.</p>
+    <p style="margin:0 0 28px;color:#6b7280;font-size:14px;line-height:1.6">Welcome to the Metromindz team! Your administrator account is ready. Set your own password using the secure link below; it expires in one hour.</p>
     <!-- Credentials Card -->
     <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;margin-bottom:28px">
       <tr><td style="padding:20px 24px;border-bottom:1px solid #e2e8f0">
         <p style="margin:0 0 4px;color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px">Portal URL</p>
-        <a href="${loginUrl}" style="color:#f59e0b;font-size:14px;font-weight:600;text-decoration:none">${loginUrl}</a>
+        <a href="${passwordSetupUrl}" style="color:#f59e0b;font-size:14px;font-weight:600;text-decoration:none">Set your password securely</a>
       </td></tr>
       <tr><td style="padding:20px 24px;border-bottom:1px solid #e2e8f0">
         <p style="margin:0 0 4px;color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px">Email Address</p>
         <p style="margin:0;color:#1e293b;font-size:14px;font-weight:600;font-family:monospace">${email}</p>
-      </td></tr>
-      <tr><td style="padding:20px 24px;border-bottom:1px solid #e2e8f0">
-        <p style="margin:0 0 4px;color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px">Temporary Password</p>
-        <p style="margin:0;color:#1e293b;font-size:16px;font-weight:800;font-family:monospace;background:#fff7ed;border:1px dashed #f59e0b;border-radius:6px;padding:8px 12px;display:inline-block;letter-spacing:2px">${password}</p>
       </td></tr>
       <tr><td style="padding:20px 24px">
         <p style="margin:0 0 4px;color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px">Assigned Role</p>
@@ -49,12 +46,12 @@ function adminWelcomeEmail({fullName,email,password,role,loginUrl}){
     </table>
     <!-- CTA Button -->
     <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding-bottom:28px">
-      <a href="${loginUrl}" style="display:inline-block;background:#f59e0b;color:#1a1a2e;font-size:15px;font-weight:800;padding:14px 40px;border-radius:8px;text-decoration:none;letter-spacing:0.3px">Login to Admin Dashboard &rarr;</a>
+      <a href="${passwordSetupUrl}" style="display:inline-block;background:#f59e0b;color:#1a1a2e;font-size:15px;font-weight:800;padding:14px 40px;border-radius:8px;text-decoration:none;letter-spacing:0.3px">Set Password &rarr;</a>
     </td></tr></table>
     <!-- Security Notice -->
     <table width="100%" cellpadding="0" cellspacing="0" style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px"><tr><td style="padding:16px 20px">
       <p style="margin:0 0 4px;color:#92400e;font-size:12px;font-weight:800">&#9888; Security Reminder</p>
-      <p style="margin:0;color:#92400e;font-size:12px;line-height:1.5">Please change your password immediately after your first login. Never share your credentials with anyone. If you did not expect this email, contact your system administrator right away.</p>
+      <p style="margin:0;color:#92400e;font-size:12px;line-height:1.5">Never share credentials or this link. If you did not expect this email, contact your administrator right away.</p>
     </td></tr></table>
   </td></tr>
   <!-- Footer -->
@@ -170,30 +167,35 @@ router.get("/users", requireRole("admin"), requirePermission("users:read"), asyn
   const users=await User.find({role:{$in:["admin","support"]}}).populate("roleRef").sort({createdAt:-1});
   res.json({items:users.map(adminUser)});
 }));
+const adminPassword=z.string().min(12).max(128).regex(/[a-z]/,"Password must include a lowercase letter").regex(/[A-Z]/,"Password must include an uppercase letter").regex(/\d/,"Password must include a number").regex(/[^A-Za-z0-9]/,"Password must include a special character").refine(v=>!/(password|123456|qwerty|admin)/i.test(v),"Password is too common");
 router.post("/users", requireRole("admin"), requirePermission("users:create"), asyncHandler(async(req,res)=>{
-  const data=z.object({fullName:z.string().trim().min(2).max(100),email:z.string().email(),password:z.string().min(8).max(128).regex(/(?=.*[A-Z])(?=.*\d)/,"Password must include an uppercase letter and a number"),roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),role:z.enum(["admin","support"]).default("admin")}).parse(req.body);
+  const data=z.object({fullName:z.string().trim().min(2).max(100),email:z.string().email(),password:adminPassword,roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),role:z.enum(["admin","support"]).default("admin"),twoFactorEnabled:z.boolean().default(false)}).parse(req.body);
   const existing=await User.findOne({email:data.email.toLowerCase()});
   if(existing)throw fail(409,"An account with this email already exists");
   const roleDoc=data.roleId?await Role.findById(data.roleId):null;
   if(data.roleId&&!roleDoc)throw fail(404,"Role not found");
   if(roleDoc?.isSuperAdmin&&await User.exists({roleRef:roleDoc._id}))throw fail(409,"A Super Admin account already exists");
-  const user=await User.create({fullName:data.fullName,email:data.email.toLowerCase(),passwordHash:await bcrypt.hash(data.password,12),role:data.role,roleRef:roleDoc?._id||null});
+  const user=await User.create({fullName:data.fullName,email:data.email.toLowerCase(),passwordHash:await bcrypt.hash(data.password,12),role:data.role,roleRef:roleDoc?._id||null,twoFactorEnabled:data.twoFactorEnabled});
   await user.populate("roleRef");
-  // Send welcome email with credentials
+  // Use a one-time password link; credentials are never sent by email.
   const roleName=roleDoc?.name||(data.role==="admin"?"Administrator":"Support");
+  const rawToken=crypto.randomBytes(32).toString("base64url");
+  await PasswordToken.deleteMany({user:user._id});
+  await PasswordToken.create({user:user._id,tokenHash:crypto.createHash("sha256").update(rawToken).digest("hex"),expiresAt:new Date(Date.now()+60*60*1000)});
   await sendEmail({
     to:data.email,
     subject:"Welcome to Metromindz Admin — Your Account is Ready",
-    html:adminWelcomeEmail({fullName:data.fullName,email:data.email,password:data.password,role:roleName,loginUrl:`${env.clientUrl}/admin/staff/login`})
+    html:adminWelcomeEmail({fullName:data.fullName,email:data.email,role:roleName,passwordSetupUrl:`${env.clientUrl.replace(/\/$/,"")}/admin/staff/reset-password?token=${encodeURIComponent(rawToken)}`})
   }).catch(()=>{});
   res.status(201).json({user:adminUser(user)});
 }));
 router.patch("/users/:id", requireRole("admin"), requirePermission("users:update"), asyncHandler(async(req,res)=>{
-  const data=z.object({fullName:z.string().trim().min(2).max(100).optional(),role:z.enum(["admin","support"]).optional(),roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),status:z.enum(["active","disabled"]).optional(),password:z.string().min(8).max(128).regex(/(?=.*[A-Z])(?=.*\d)/,"Password must include an uppercase letter and a number").optional()}).parse(req.body);
+  const data=z.object({fullName:z.string().trim().min(2).max(100).optional(),role:z.enum(["admin","support"]).optional(),roleId:z.string().regex(/^[a-f\d]{24}$/i,"Invalid role id").optional(),status:z.enum(["active","disabled"]).optional(),password:adminPassword.optional(),twoFactorEnabled:z.boolean().optional()}).parse(req.body);
   const patch={};
   if(data.fullName)patch.fullName=data.fullName;
   if(data.role)patch.role=data.role;
   if(data.status)patch.status=data.status;
+  if(data.twoFactorEnabled!==undefined)patch.twoFactorEnabled=data.twoFactorEnabled;
   if(data.roleId){const roleDoc=await Role.findById(data.roleId);if(!roleDoc)throw fail(404,"Role not found");const current=await User.findById(req.params.id);if(roleDoc.isSuperAdmin&&current?.roleRef?.toString()!==roleDoc.id&&await User.exists({roleRef:roleDoc._id}))throw fail(409,"A Super Admin account already exists");patch.roleRef=roleDoc._id;}
   if(data.password)patch.passwordHash=await bcrypt.hash(data.password,12);
   const user=await User.findOneAndUpdate({_id:req.params.id,role:{$in:["admin","support"]}},patch,{new:true,runValidators:true}).populate("roleRef");
@@ -209,10 +211,11 @@ router.delete("/users/:id", requireRole("admin"), requirePermission("users:delet
   res.status(204).end();
 }));
 
-const roleBody=z.object({name:z.string().trim().min(2).max(80),description:z.string().max(500).default(""),isSuperAdmin:z.boolean().default(false),permissions:z.array(z.string().trim().min(1).max(100)).max(200).default([])});
+const roleBody=z.object({name:z.string().trim().min(2).max(80),description:z.string().max(500).default(""),permissions:z.array(z.string().trim().min(1).max(100)).max(200).default([])}).superRefine((data,ctx)=>{if(data.name.trim().toLowerCase()==="super admin")ctx.addIssue({code:z.ZodIssueCode.custom,path:["name"],message:"Super Admin is a protected account, not a creatable role"});});
 router.get("/roles", requireRole("admin"), requirePermission("users:read"), asyncHandler(async(_req,res)=>res.json({items:await Role.find().sort({isSuperAdmin:-1,name:1})})));
 router.post("/roles", requireRole("admin"), requirePermission("users:create"), asyncHandler(async(req,res)=>res.status(201).json({role:await Role.create(roleBody.parse(req.body))})));
 router.patch("/roles/:id", requireRole("admin"), requirePermission("users:update"), asyncHandler(async(req,res)=>{
+  if((await Role.findById(req.params.id))?.isSuperAdmin)throw fail(400,"The protected Super Admin role cannot be changed");
   const role=await Role.findByIdAndUpdate(req.params.id,roleBody.partial().parse(req.body),{new:true,runValidators:true});
   if(!role)throw fail(404,"Role not found");
   res.json({role});
